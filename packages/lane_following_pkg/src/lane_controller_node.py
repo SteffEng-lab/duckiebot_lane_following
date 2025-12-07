@@ -91,6 +91,10 @@ class LaneControllerNode(DTROS):
         self.omega_pub = rospy.Publisher(f"/{self._vehicle_name}/lane_controller/omega", Float64, queue_size=10)
         self.enabled_pub = rospy.Publisher(f"/{self._vehicle_name}/lane_controller/enabled", Bool, queue_size=10)
         
+        # Publishers for tracking vanishing point (for rqt_plot)
+        self.x_v_current_pub = rospy.Publisher(f"/{self._vehicle_name}/lane_controller/x_v_current", Float64, queue_size=10)
+        self.x_v_target_pub = rospy.Publisher(f"/{self._vehicle_name}/lane_controller/x_v_target", Float64, queue_size=10)
+        
         # Subscribers (create AFTER publishers so callbacks can use them)
         self.vanish_sub = rospy.Subscriber(f"/{self._vehicle_name}/lane_following/vanishing_point", Point, self.vanishing_callback, queue_size=10)
         self.mid_sub = rospy.Subscriber(f"/{self._vehicle_name}/lane_following/mid_point", Point, self.middle_callback, queue_size=10)
@@ -271,6 +275,15 @@ class LaneControllerNode(DTROS):
                 # Error: we want vanishing point at center (x_v = 0)
                 trgt_x_v = -30          # Target vanishing point offset to the left
                 error = trgt_x_v - self.x_v_filtered
+                
+                # Publish current and target x_v for rqt_plot
+                x_v_current_msg = Float64()
+                x_v_current_msg.data = self.x_v_filtered
+                self.x_v_current_pub.publish(x_v_current_msg)
+                
+                x_v_target_msg = Float64()
+                x_v_target_msg.data = trgt_x_v
+                self.x_v_target_pub.publish(x_v_target_msg)
                 
                 # Calculate dt for integral and derivative terms
                 current_time = rospy.Time.now()
