@@ -47,11 +47,14 @@ class LaneControllerNode(DTROS):
             rospy.set_param('~omega_max', 2.0)  # Reduced from 5.0 - limit maximum turning rate
         if not rospy.has_param('~wheel_speed_max'):
             rospy.set_param('~wheel_speed_max', 5.0)  # Reduced from 10.0
+        if not rospy.has_param('~vanishing_point_filter_alpha'):
+            rospy.set_param('~vanishing_point_filter_alpha', 0.3)  # EMA filter: 0=no filtering, 1=no smoothing
 
         self.update_parameters()
 
         # Initialize feature values
-        self.x_v = None
+        self.x_v = None  # Raw vanishing point x
+        self.x_v_filtered = None  # Filtered vanishing point x (for control)
         self.x_m = None
         
         # PID controller state
@@ -72,6 +75,7 @@ class LaneControllerNode(DTROS):
         
         self.corner_detected = False  # True if corner was detected
         self.yellow_line_visible = True
+        self.white_line_visible = True
         self.white_line_angle = 0.0
 
         self.corner_update_counter = 0
@@ -93,6 +97,7 @@ class LaneControllerNode(DTROS):
 
         self.corner_sub = rospy.Subscriber(f"/{self._vehicle_name}/lane_following/corner_detected", Bool, self.corner_callback, queue_size=10)
         self.yellow_line_visible_sub = rospy.Subscriber(f"/{self._vehicle_name}/lane_following/yellow_line_visible", Bool, self.yellow_line_visible_callback, queue_size=10)
+        self.white_line_visible_sub = rospy.Subscriber(f"/{self._vehicle_name}/lane_following/white_line_visible", Bool, self.white_line_visible_callback, queue_size=10)
         self.white_line_angle_sub = rospy.Subscriber(f"/{self._vehicle_name}/lane_following/white_line_angle", Float64, self.white_line_angle_callback, queue_size=10)
 
         # Services for runtime control
@@ -107,7 +112,19 @@ class LaneControllerNode(DTROS):
 
 
     def vanishing_callback(self, msg):
-        self.x_v = msg.x
+        # Apply exponential moving average (EMA) filter to reduce noise
+        # x_filtered(n) = alpha * x_raw(n) + (1 - alpha) * x_filtered(n-1)
+        # alpha close to 1 = less filtering, alpha close to 0 = more smoothing
+        
+        self.x_v = msg.x  # Store raw value
+        
+        if self.x_v_filtered is None:
+            # First measurement - initialize filter
+            self.x_v_filtered = self.x_v
+        else:
+            # Apply EMA filter
+            self.x_v_filtered = self.vanishing_point_filter_alpha * self.x_v + (1.0 - self.vanishing_point_filter_alpha) * self.x_v_filtered
+        
         self.try_compute_control()
 
     def middle_callback(self, msg):
@@ -132,6 +149,11 @@ class LaneControllerNode(DTROS):
 
         if prev_yellow_line_visible and not self.yellow_line_visible:
             self.log("Yellow line not visible")
+    
+    def white_line_visible_callback(self, msg):
+        self.white_line_visible = msg.data
+        if not self.white_line_visible:
+            self.log("WARNING: White line not visible - stopping!")
 
     def white_line_angle_callback(self, msg):
         self.white_line_angle = msg.data
@@ -146,6 +168,7 @@ class LaneControllerNode(DTROS):
         self.R = rospy.get_param('~R', 0.031)
         self.omega_max = rospy.get_param('~omega_max', 2.0)
         self.wheel_speed_max = rospy.get_param('~wheel_speed_max', 5.0)
+        self.vanishing_point_filter_alpha = rospy.get_param('~vanishing_point_filter_alpha', 0.3)
         self.update_ctrl_parameters()
 
     def update_ctrl_parameters(self):
@@ -175,24 +198,38 @@ class LaneControllerNode(DTROS):
             cmd.vel_right = 0.0
             #self.wheels_pub.publish(cmd)
             return
+        
+        # Check if white line is missing -> stop immediately for safety
+        if not self.white_line_visible:
+            self.disable_callback(None)
+            cmd = WheelsCmdStamped()
+            cmd.header.stamp = rospy.Time.now()
+            cmd.vel_left = 0.0
+            cmd.vel_right = 0.0
+            self.wheels_pub.publish(cmd)
+            return
     
 
         self.corner_update_counter += 1
         if self.corner_update_counter >= 70:       # Re-enable controller every ~3 seconds
             self.corner_update_counter = 0
 
-            self.controller_enabled = True
+            #self.controller_enabled = True
 
         #"""
         # Set omega based on controller state
         if self.corner_detected:
             # Constant turning velocity
-            omega = 0.10
-            self.v = 0.005
+            #omega = 0.10
+            #self.v = 0.005
+
+            omega = 0.0
+            self.v = 0.0
 
             self.corner_update_counter = 0
             self.controller_enabled = False
             self.reset_callback(None)
+            self.disable_callback(None)
 
             self.log(f"Corner maneuver: setting constant omega={omega}")
         elif self.controller_enabled:
@@ -228,12 +265,12 @@ class LaneControllerNode(DTROS):
                 self.log(f"Yellow line not visible - Angle PID: e={error_angle:.2f}°, I={self.integral_error_angle:.2f}, D={derivative_angle:.2f}, ω={omega:.3f}")
             else:
                 # PID Controller on vanishing point error
-                if self.x_v is None or self.x_m is None:
+                if self.x_v_filtered is None or self.x_m is None:
                     return
 
                 # Error: we want vanishing point at center (x_v = 0)
-                trgt_x_v = -50          # Target vanishing point offset to the left
-                error = trgt_x_v - self.x_v
+                trgt_x_v = -30          # Target vanishing point offset to the left
+                error = trgt_x_v - self.x_v_filtered
                 
                 # Calculate dt for integral and derivative terms
                 current_time = rospy.Time.now()

@@ -76,6 +76,9 @@ class Vision_Processing_Node(DTROS):
 
         # Publisher for yellow line state
         self.yellow_line_visible_pub = rospy.Publisher(f"/{self._vehicle_name}/lane_following/yellow_line_visible", Bool, queue_size=10)
+        
+        # Publisher for white line state
+        self.white_line_visible_pub = rospy.Publisher(f"/{self._vehicle_name}/lane_following/white_line_visible", Bool, queue_size=10)
 
         # Publisher for slope of white line
         self.white_line_angle_pub = rospy.Publisher(f"/{self._vehicle_name}/lane_following/white_line_angle", Float64, queue_size=10)       # Publish angle in deg
@@ -149,6 +152,11 @@ class Vision_Processing_Node(DTROS):
         white_lines = cv2.HoughLines(image_white_cropped, 1, np.pi/180, 70, None, 0, 0)
         yellow_lines = cv2.HoughLines(image_yellow_cropped, 1, np.pi/180, 40, None, 0, 0)
 
+        # Publish white line visibility status
+        white_line_visible_msg = Bool()
+        white_line_visible_msg.data = (white_lines is not None)
+        self.white_line_visible_pub.publish(white_line_visible_msg)
+
         # Calc average lines
         if white_lines is not None:
             white_line_avrg = (np.mean(white_lines[:, 0, 0]), np.mean(white_lines[:, 0, 1]))        # (r, theta)
@@ -208,7 +216,7 @@ class Vision_Processing_Node(DTROS):
         if white_lines is not None:
             #white_line_angle = -1 * (np.cos(white_line_avrg[1]) / np.sin(white_line_avrg[1]))  # slope a of y = a*x + b
             #self.log(f"White line slope: {white_line_angle:.2f}")
-            if 0 < self.white_line_angle < 18:      # Corner detected if yellow line is not visible anymore
+            if 0 < self.white_line_angle < 15:      # Corner detected if yellow line is not visible anymore
                 #self.log("Corner detected on white line")
                 corner_detected = True
             else:
