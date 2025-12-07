@@ -78,8 +78,6 @@ class LaneControllerNode(DTROS):
         self.white_line_visible = True
         self.white_line_angle = 0.0
 
-        self.corner_update_counter = 0
-
         # Cache parameters (read once at init, update periodically)
         self.update_parameters()
         self.param_update_counter = 0
@@ -200,7 +198,6 @@ class LaneControllerNode(DTROS):
             cmd.header.stamp = rospy.Time.now()
             cmd.vel_left = 0.0
             cmd.vel_right = 0.0
-            #self.wheels_pub.publish(cmd)
             return
         
         # Check if white line is missing -> stop immediately for safety
@@ -214,23 +211,12 @@ class LaneControllerNode(DTROS):
             return
     
 
-        self.corner_update_counter += 1
-        if self.corner_update_counter >= 70:       # Re-enable controller every ~3 seconds
-            self.corner_update_counter = 0
-
-            #self.controller_enabled = True
-
-        #"""
         # Set omega based on controller state
         if self.corner_detected:
-            # Constant turning velocity
-            #omega = 0.10
-            #self.v = 0.005
-
+            # Stop the robot when detecting a corner
             omega = 0.0
             self.v = 0.0
 
-            self.corner_update_counter = 0
             self.controller_enabled = False
             self.reset_callback(None)
             self.disable_callback(None)
@@ -238,6 +224,7 @@ class LaneControllerNode(DTROS):
             self.log(f"Corner maneuver: setting constant omega={omega}")
         elif self.controller_enabled:
             if not self.yellow_line_visible:
+                """ Test: PID control on white line angle only when yellow line is missing
                 # Control angle of white line using PID controller
                 error_angle = self.target_white_line_angle - self.white_line_angle
 
@@ -262,11 +249,14 @@ class LaneControllerNode(DTROS):
                 else:
                     derivative_angle = 0.0
                 self.last_error_angle = error_angle
-
+                
                 # PID control law for angle
                 #omega = self.kp_angle * error_angle + self.ki_angle * self.integral_error_angle + self.kd_angle * derivative_angle
-                omega = 0.0
                 self.log(f"Yellow line not visible - Angle PID: e={error_angle:.2f}°, I={self.integral_error_angle:.2f}, D={derivative_angle:.2f}, ω={omega:.3f}")
+                """
+                
+                omega = 0.0         # Hold omega at 0 when yellow line is missing (simplification)
+                
             else:
                 # PID Controller on vanishing point error
                 if self.x_v_filtered is None or self.x_m is None:
@@ -314,7 +304,6 @@ class LaneControllerNode(DTROS):
         else:
             # This should never happen due to early return, but add safety
             return
-        #"""
 
         omega = max(-self.omega_max, min(self.omega_max, omega))
 
