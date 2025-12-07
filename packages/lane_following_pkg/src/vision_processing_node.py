@@ -216,7 +216,7 @@ class Vision_Processing_Node(DTROS):
         if white_lines is not None:
             #white_line_angle = -1 * (np.cos(white_line_avrg[1]) / np.sin(white_line_avrg[1]))  # slope a of y = a*x + b
             #self.log(f"White line slope: {white_line_angle:.2f}")
-            if 0 < self.white_line_angle < 15:      # Corner detected if yellow line is not visible anymore
+            if 0 < self.white_line_angle < 15 and not self.is_yellow_line_visible:      # Corner detected if yellow line is not visible anymore
                 #self.log("Corner detected on white line")
                 corner_detected = True
             else:
@@ -263,7 +263,7 @@ class Vision_Processing_Node(DTROS):
 
 
         # Debug: Convert grayscale image back to CompressedImage
-        debug_msg = self._bridge.cv2_to_compressed_imgmsg(image_grayscale_BGR)
+        debug_msg = self._bridge.cv2_to_compressed_imgmsg(image_grayscale_BGR) 
         self.pub_debug.publish(debug_msg)
 
 

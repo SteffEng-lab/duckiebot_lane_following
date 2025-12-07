@@ -47,8 +47,8 @@ class LaneControllerNode(DTROS):
             rospy.set_param('~omega_max', 2.0)  # Reduced from 5.0 - limit maximum turning rate
         if not rospy.has_param('~wheel_speed_max'):
             rospy.set_param('~wheel_speed_max', 5.0)  # Reduced from 10.0
-        if not rospy.has_param('~vanishing_point_filter_alpha'):
-            rospy.set_param('~vanishing_point_filter_alpha', 0.3)  # EMA filter: 0=no filtering, 1=no smoothing
+        if rospy.has_param('~vanishing_point_filter_alpha'):
+            rospy.set_param('~vanishing_point_filter_alpha', 0.7)  # EMA filter: higher = more reactive (changed from 0.3)
 
         self.update_parameters()
 
@@ -129,7 +129,7 @@ class LaneControllerNode(DTROS):
 
     def middle_callback(self, msg):
         self.x_m = msg.x
-        self.try_compute_control()
+        # Don't call try_compute_control here - only from vanishing_callback to avoid double updates
     
     def corner_callback(self, msg):
         prev_corner_detected = self.corner_detected
@@ -296,7 +296,7 @@ class LaneControllerNode(DTROS):
 
                 omega = self.kp * error + self.ki * self.integral_error + self.kd * derivative
 
-                self.log(f"PID: e={error:.2f}, P={self.kp*error:.2f}, I={self.ki*self.integral_error:.2f}, D={self.kd*derivative:.2f}, ω={omega:.3f}")
+                self.log(f"PID: x_v={self.x_v_filtered:.1f}→{trgt_x_v:.1f}, e={error:.2f}, P={self.kp*error:.2f}, I={self.ki*self.integral_error:.2f}, D={self.kd*derivative:.2f}, ω={omega:.3f}")
         
         else:
             # This should never happen due to early return, but add safety
