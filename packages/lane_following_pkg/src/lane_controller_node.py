@@ -29,6 +29,14 @@ class LaneControllerNode(DTROS):
             rospy.set_param('~ki', 0.0005)  # Integral gain
         if not rospy.has_param('~kd'):
             rospy.set_param('~kd', 0.00001)  # Derivative gain
+        if not rospy.has_param('~kp_angle'):
+            rospy.set_param('~kp_angle', 0.01)  # Proportional gain for angle control
+        if not rospy.has_param('~ki_angle'):
+            rospy.set_param('~ki_angle', 0.001)  # Integral gain for angle control
+        if not rospy.has_param('~kd_angle'):
+            rospy.set_param('~kd_angle', 0.0001)  # Derivative gain for angle control
+        if not rospy.has_param('~target_white_line_angle'):
+            rospy.set_param('~target_white_line_angle', 51.0)  # Target angle in degrees
         if not rospy.has_param('~v'):
             rospy.set_param('~v', 0.005)  # forward speed (m/s)
         if not rospy.has_param('~L'):
@@ -51,6 +59,11 @@ class LaneControllerNode(DTROS):
         self.last_error = 0.0
         self.last_time = None
         
+        # PID controller state for angle control
+        self.integral_error_angle = 0.0
+        self.last_error_angle = 0.0
+        self.last_time_angle = None
+        
         # Output enable/disable (controlled by services only)
         self.enable_output = False  # False at startup, only services can change this
         
@@ -58,6 +71,10 @@ class LaneControllerNode(DTROS):
         self.controller_enabled = True  # Start enabled, corner detection will toggle this
         
         self.corner_detected = False  # True if corner was detected
+        self.yellow_line_visible = True
+        self.white_line_angle = 0.0
+
+        self.corner_update_counter = 0
 
         # Cache parameters (read once at init, update periodically)
         self.update_parameters()
@@ -73,8 +90,11 @@ class LaneControllerNode(DTROS):
         # Subscribers (create AFTER publishers so callbacks can use them)
         self.vanish_sub = rospy.Subscriber(f"/{self._vehicle_name}/lane_following/vanishing_point", Point, self.vanishing_callback, queue_size=10)
         self.mid_sub = rospy.Subscriber(f"/{self._vehicle_name}/lane_following/mid_point", Point, self.middle_callback, queue_size=10)
+
         self.corner_sub = rospy.Subscriber(f"/{self._vehicle_name}/lane_following/corner_detected", Bool, self.corner_callback, queue_size=10)
-        
+        self.yellow_line_visible_sub = rospy.Subscriber(f"/{self._vehicle_name}/lane_following/yellow_line_visible", Bool, self.yellow_line_visible_callback, queue_size=10)
+        self.white_line_angle_sub = rospy.Subscriber(f"/{self._vehicle_name}/lane_following/white_line_angle", Float64, self.white_line_angle_callback, queue_size=10)
+
         # Services for runtime control
         self.reset_srv = rospy.Service(f"/{self._vehicle_name}/lane_controller/reset", Empty, self.reset_callback)
         self.enable_srv = rospy.Service(f"/{self._vehicle_name}/lane_controller/enable", Empty, self.enable_callback)
@@ -98,7 +118,7 @@ class LaneControllerNode(DTROS):
         prev_corner_detected = self.corner_detected
         self.corner_detected = msg.data
 
-        if self.corner_detected:
+        if self.corner_detected and not prev_corner_detected:  # Check for transition from False to True
             self.log("Corner detected - disabling controller")
             self.controller_enabled = False
             self.try_compute_control()
@@ -106,6 +126,16 @@ class LaneControllerNode(DTROS):
             self.log("Corner cleared - enabling controller")
             self.controller_enabled = True
 
+    def yellow_line_visible_callback(self, msg):
+        prev_yellow_line_visible = self.yellow_line_visible
+        self.yellow_line_visible = msg.data
+
+        if prev_yellow_line_visible and not self.yellow_line_visible:
+            self.log("Yellow line not visible")
+
+    def white_line_angle_callback(self, msg):
+        self.white_line_angle = msg.data
+    
 
     def update_parameters(self):
         """Update controller parameters from parameter server"""
@@ -122,13 +152,18 @@ class LaneControllerNode(DTROS):
         self.kp = rospy.get_param('~kp', 0.5)
         self.ki = rospy.get_param('~ki', 0.01)
         self.kd = rospy.get_param('~kd', 0.05)
+        self.kp_angle = rospy.get_param('~kp_angle', 0.01)
+        self.ki_angle = rospy.get_param('~ki_angle', 0.001)
+        self.kd_angle = rospy.get_param('~kd_angle', 0.0001)
+        self.target_white_line_angle = rospy.get_param('~target_white_line_angle', 51.0)
         self.v = rospy.get_param('~v', 0.0)
+
 
     def try_compute_control(self):
         # Update parameters every 100 calls (~3 seconds at 30Hz) instead of every call
         self.param_update_counter += 1
         if self.param_update_counter >= 100:
-            self.update_parameters()
+            self.update_ctrl_parameters()
             self.param_update_counter = 0
         
         # Check if output is disabled via service -> stop immediately
@@ -141,50 +176,96 @@ class LaneControllerNode(DTROS):
             #self.wheels_pub.publish(cmd)
             return
     
+
+        self.corner_update_counter += 1
+        if self.corner_update_counter >= 70:       # Re-enable controller every ~3 seconds
+            self.corner_update_counter = 0
+
+            self.controller_enabled = True
+
+        #"""
         # Set omega based on controller state
         if self.corner_detected:
             # Constant turning velocity
-            omega = 0.1
+            omega = 0.10
+            self.v = 0.005
 
-            self.log("Corner maneuver: setting constant omega=0.1")
+            self.corner_update_counter = 0
+            self.controller_enabled = False
+            self.reset_callback(None)
+
+            self.log(f"Corner maneuver: setting constant omega={omega}")
         elif self.controller_enabled:
-            # PID Controller on vanishing point error
-            if self.x_v is None or self.x_m is None:
-                return
+            if not self.yellow_line_visible:
+                # Control angle of white line using PID controller
+                error_angle = self.target_white_line_angle - self.white_line_angle
 
-            # Error: we want vanishing point at center (x_v = 0)
-            error = 0 - self.x_v
-            
-            # Calculate dt for integral and derivative terms
-            current_time = rospy.Time.now()
-            if self.last_time is None:
-                dt = 0.0
+                # Calculate dt for integral and derivative terms
+                current_time_angle = rospy.Time.now()
+                if self.last_time_angle is None:
+                    dt_angle = 0.0
+                else:
+                    dt_angle = (current_time_angle - self.last_time_angle).to_sec()
+                self.last_time_angle = current_time_angle
+                
+                # Integral term with anti-windup
+                if dt_angle > 0:
+                    self.integral_error_angle += error_angle * dt_angle
+                    # Anti-windup: limit integral term
+                    max_integral_angle = self.omega_max / max(self.ki_angle, 1e-6)
+                    self.integral_error_angle = max(-max_integral_angle, min(max_integral_angle, self.integral_error_angle))
+                
+                # Derivative term
+                if dt_angle > 0:
+                    derivative_angle = (error_angle - self.last_error_angle) / dt_angle
+                else:
+                    derivative_angle = 0.0
+                self.last_error_angle = error_angle
+
+                # PID control law for angle
+                #omega = self.kp_angle * error_angle + self.ki_angle * self.integral_error_angle + self.kd_angle * derivative_angle
+                omega = 0.0
+                self.log(f"Yellow line not visible - Angle PID: e={error_angle:.2f}°, I={self.integral_error_angle:.2f}, D={derivative_angle:.2f}, ω={omega:.3f}")
             else:
-                dt = (current_time - self.last_time).to_sec()
-            self.last_time = current_time
-            
-            # Integral term with anti-windup
-            if dt > 0:
-                self.integral_error += error * dt
-                # Anti-windup: limit integral term
-                max_integral = self.omega_max / max(self.ki, 1e-6)
-                self.integral_error = max(-max_integral, min(max_integral, self.integral_error))
-            
-            # Derivative term
-            if dt > 0:
-                derivative = (error - self.last_error) / dt
-            else:
-                derivative = 0.0
-            self.last_error = error
+                # PID Controller on vanishing point error
+                if self.x_v is None or self.x_m is None:
+                    return
 
-            omega = self.kp * error + self.ki * self.integral_error + self.kd * derivative
+                # Error: we want vanishing point at center (x_v = 0)
+                trgt_x_v = -50          # Target vanishing point offset to the left
+                error = trgt_x_v - self.x_v
+                
+                # Calculate dt for integral and derivative terms
+                current_time = rospy.Time.now()
+                if self.last_time is None:
+                    dt = 0.0
+                else:
+                    dt = (current_time - self.last_time).to_sec()
+                self.last_time = current_time
+                
+                # Integral term with anti-windup
+                if dt > 0:
+                    self.integral_error += error * dt
+                    # Anti-windup: limit integral term
+                    max_integral = self.omega_max / max(self.ki, 1e-6)
+                    self.integral_error = max(-max_integral, min(max_integral, self.integral_error))
+                
+                # Derivative term
+                if dt > 0:
+                    derivative = (error - self.last_error) / dt
+                else:
+                    derivative = 0.0
+                self.last_error = error
 
-            self.log(f"PID: e={error:.2f}, I={self.integral_error:.2f}, D={derivative:.2f}, ω={omega:.3f}")
+                omega = self.kp * error + self.ki * self.integral_error + self.kd * derivative
+
+                self.log(f"PID: e={error:.2f}, P={self.kp*error:.2f}, I={self.ki*self.integral_error:.2f}, D={self.kd*derivative:.2f}, ω={omega:.3f}")
         
         else:
             # This should never happen due to early return, but add safety
             return
-        
+        #"""
+
         omega = max(-self.omega_max, min(self.omega_max, omega))
 
         # Publish omega control output
@@ -219,12 +300,16 @@ class LaneControllerNode(DTROS):
         self.integral_error = 0.0
         self.last_error = 0.0
         self.last_time = None
+        self.integral_error_angle = 0.0
+        self.last_error_angle = 0.0
+        self.last_time_angle = None
         return EmptyResponse()
     
     def enable_callback(self, req):
         """Service callback to enable output"""
         self.log("Enabling output")
         self.enable_output = True
+        self.reset_callback(None)  # Reset PID state when enabling
         return EmptyResponse()
     
     def disable_callback(self, req):
@@ -235,6 +320,9 @@ class LaneControllerNode(DTROS):
         self.integral_error = 0.0
         self.last_error = 0.0
         self.last_time = None
+        self.integral_error_angle = 0.0
+        self.last_error_angle = 0.0
+        self.last_time_angle = None
         # Send zero command
         cmd = WheelsCmdStamped()
         cmd.header.stamp = rospy.Time.now()
@@ -250,6 +338,8 @@ class LaneControllerNode(DTROS):
         # Reset PID state
         self.integral_error = 0.0
         self.last_error = 0.0
+        self.integral_error_angle = 0.0
+        self.last_error_angle = 0.0
         
         # Send zero velocity command
         cmd = WheelsCmdStamped()

@@ -7,7 +7,7 @@ import rospy
 from duckietown.dtros import DTROS, NodeType
 from sensor_msgs.msg import CompressedImage
 from geometry_msgs.msg import Point
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Float64, Bool, String
 import cv2
 from cv_bridge import CvBridge
 import numpy as np
@@ -58,6 +58,8 @@ class Vision_Processing_Node(DTROS):
         self.corner_detected = False
         self.corner_direction = "none"  # "left", "right", or "none"
         
+        self.white_line_angle = 0.0     # Slope of white line between bottom image axis and white line
+
         # Corner detection threshold (angle in radians)
         self.corner_angle_threshold = np.pi / 6  # 30 degrees
         
@@ -71,6 +73,12 @@ class Vision_Processing_Node(DTROS):
         # Publisher for corner detection state
         self.corner_detected_pub = rospy.Publisher(f"/{self._vehicle_name}/lane_following/corner_detected", Bool, queue_size=10)
         self.corner_direction_pub = rospy.Publisher(f"/{self._vehicle_name}/lane_following/corner_direction", String, queue_size=10)
+
+        # Publisher for yellow line state
+        self.yellow_line_visible_pub = rospy.Publisher(f"/{self._vehicle_name}/lane_following/yellow_line_visible", Bool, queue_size=10)
+
+        # Publisher for slope of white line
+        self.white_line_angle_pub = rospy.Publisher(f"/{self._vehicle_name}/lane_following/white_line_angle", Float64, queue_size=10)       # Publish angle in deg
 
         # Publish debug image (note: topic name WITHOUT /compressed suffix)
         # ROS will automatically add /compressed when you subscribe
@@ -127,7 +135,7 @@ class Vision_Processing_Node(DTROS):
         # Create mask
         img_height, img_width = edges_white.shape
         ROI_mask = np.zeros(edges_white.shape, np.uint8)
-        ROI_mask[img_height//2:img_height, 0:img_width] = 1
+        ROI_mask[img_height//3:img_height, 0:img_width] = 1
         # Apply mask
         image_white_cropped = cv2.bitwise_and(edges_white, edges_white, mask=ROI_mask)
         image_yellow_cropped = cv2.bitwise_and(edges_yellow, edges_yellow, mask=ROI_mask)
@@ -144,6 +152,8 @@ class Vision_Processing_Node(DTROS):
         # Calc average lines
         if white_lines is not None:
             white_line_avrg = (np.mean(white_lines[:, 0, 0]), np.mean(white_lines[:, 0, 1]))        # (r, theta)
+            self.white_line_angle = white_line_avrg[1]*180/np.pi - 90
+            self.white_line_angle_pub.publish(self.white_line_angle)
         if yellow_lines is not None:
             yellow_line_avrg = (np.mean(yellow_lines[:, 0, 0]), np.mean(yellow_lines[:, 0, 1]))        # (r, theta)
 
@@ -186,16 +196,26 @@ class Vision_Processing_Node(DTROS):
             self.vanish_pub.publish(vanishing_point_center_coords)
             self.mid_pub.publish(midpoint_center_coords)
 
-        # Detect corners
+        # === Detect missing yellow line ===
+        if yellow_lines is None:    # Yellow line has disappeared
+            # Control robot based only on white line
+            self.is_yellow_line_visible = False
+        else:
+            self.is_yellow_line_visible = True
+        self.yellow_line_visible_pub.publish(self.is_yellow_line_visible)
+
+        # === Detect corners ===
         if white_lines is not None:
-            white_line_slope = -1 * (np.cos(white_line_avrg[1]) / np.sin(white_line_avrg[1]))  # slope a of y = a*x + b
-            #self.log(f"White line slope: {white_line_slope:.2f}")
-            if 0.1 < white_line_slope < 0.80 and yellow_lines is None:      # Corner detected if yellow line is not visible anymore
+            #white_line_angle = -1 * (np.cos(white_line_avrg[1]) / np.sin(white_line_avrg[1]))  # slope a of y = a*x + b
+            #self.log(f"White line slope: {white_line_angle:.2f}")
+            if 0 < self.white_line_angle < 18:      # Corner detected if yellow line is not visible anymore
                 #self.log("Corner detected on white line")
                 corner_detected = True
             else:
                 corner_detected = False
             self.corner_detected_pub.publish(corner_detected)
+
+        
 
         # Draw lines
         for lines in [white_lines, yellow_lines]:
